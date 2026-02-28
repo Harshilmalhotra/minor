@@ -11,9 +11,9 @@ from src.models.lstm import LSTMModel
 from src.models.tcn import TCNModel
 from src.fl.client import TimeSeriesClient
 
-def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20):
+def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, selected_features=None):
     print(f"Starting FL Simulation for {model_type.upper()} ({distribution.upper()})")
-    df = load_data()
+    df = load_data(selected_features=selected_features)
     X_train, y_train, X_test, y_test, scaler_X, scaler_y = prepare_data(df)
     
     num_features = X_train.shape[2]
