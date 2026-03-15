@@ -9,10 +9,12 @@ from src.data.dataset import load_data, prepare_data
 from src.data.split import create_iid_splits, create_non_iid_splits
 from src.models.lstm import LSTMModel
 from src.models.tcn import TCNModel
+from src.models.cascade_lstm import CascadeLSTMModel
 from src.fl.client import TimeSeriesClient
+from src.fl.layering import LayeredFedAvg
 
-def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, selected_features=None):
-    print(f"Starting FL Simulation for {model_type.upper()} ({distribution.upper()})")
+def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, selected_features=None, strategy_type="fedavg"):
+    print(f"Starting FL Simulation for {model_type.upper()} ({distribution.upper()}) with {strategy_type.upper()}")
     df = load_data(selected_features=selected_features)
     X_train, y_train, X_test, y_test, scaler_X, scaler_y = prepare_data(df)
     
@@ -30,6 +32,8 @@ def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, se
     def client_fn(cid: str) -> fl.client.Client:
         if model_type == "lstm":
             model = LSTMModel(input_size=num_features)
+        elif model_type == "cascade":
+            model = CascadeLSTMModel(input_size=num_features)
         else:
             model = TCNModel(input_size=num_features, num_channels=[128, 128, 128], kernel_size=3)
             
@@ -52,14 +56,35 @@ def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, se
             aggregated[key] = sum([num_examples * m[key] for num_examples, m in metrics]) / total_examples
         return aggregated
 
-    strategy = fl.server.strategy.FedAvg(
-        fraction_fit=1.0,
-        fraction_evaluate=1.0,
-        min_fit_clients=num_clients,
-        min_evaluate_clients=num_clients,
-        min_available_clients=num_clients,
-        evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
-    )
+    if strategy_type == "fedprox":
+        strategy = fl.server.strategy.FedProx(
+            proximal_mu=0.1,
+            fraction_fit=1.0,
+            fraction_evaluate=1.0,
+            min_fit_clients=num_clients,
+            min_evaluate_clients=num_clients,
+            min_available_clients=num_clients,
+            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
+        )
+    elif strategy_type == "layered":
+        strategy = LayeredFedAvg(
+            layer_bias={0: 1.0, 1: 0.95}, # Example bias for layering
+            fraction_fit=1.0,
+            fraction_evaluate=1.0,
+            min_fit_clients=num_clients,
+            min_evaluate_clients=num_clients,
+            min_available_clients=num_clients,
+            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
+        )
+    else:
+        strategy = fl.server.strategy.FedAvg(
+            fraction_fit=1.0,
+            fraction_evaluate=1.0,
+            min_fit_clients=num_clients,
+            min_evaluate_clients=num_clients,
+            min_available_clients=num_clients,
+            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
+        )
 
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
