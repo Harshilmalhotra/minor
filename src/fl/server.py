@@ -6,10 +6,11 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.data.dataset import load_data, prepare_data
-from src.data.split import create_iid_splits, create_non_iid_splits
+from src.data.split import create_iid_splits, create_non_iid_splits, create_algorithmic_splits
 from src.models.lstm import LSTMModel
 from src.models.tcn import TCNModel
 from src.models.cascade_lstm import CascadeLSTMModel
+from src.models.bilstm import BiLSTMModel
 from src.fl.client import TimeSeriesClient
 from src.fl.layering import LayeredFedAvg
 
@@ -26,14 +27,18 @@ def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, se
     
     if distribution == "iid":
         client_data = create_iid_splits(X_train, y_train, num_clients)
-    else:
+    elif distribution == "non-iid":
         client_data = create_non_iid_splits(X_train, y_train, num_clients)
+    elif distribution == "algorithmic":
+        client_data = create_algorithmic_splits(X_train, y_train, num_clients)
         
     def client_fn(cid: str) -> fl.client.Client:
         if model_type == "lstm":
             model = LSTMModel(input_size=num_features)
         elif model_type == "cascade":
             model = CascadeLSTMModel(input_size=num_features)
+        elif model_type == "bilstm":
+            model = BiLSTMModel(input_size=num_features)
         else:
             model = TCNModel(input_size=num_features, num_channels=[128, 128, 128], kernel_size=3)
             
