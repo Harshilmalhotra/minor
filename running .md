@@ -40,4 +40,4 @@ This generates bar chart comparisons and convergence curves in `results/plots/`.
 
 ## Note
 
-Make sure `household_power_consumption.txt` is present in the project root directory before running the scripts.
+Make sure `household_power_consumption.txt` is present in the project root directory before running the scripts
