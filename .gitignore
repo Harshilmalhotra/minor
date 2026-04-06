@@ -38,6 +38,3 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *,cover
-
-
-household_power_consumption.txt
