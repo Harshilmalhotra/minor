@@ -1,8 +1,13 @@
+import os
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-def load_data(filepath="/Users/harshil/Desktop/minor/household_power_consumption.txt", selected_features=None):
+def load_data(filepath=None, selected_features=None):
+    if filepath is None:
+        # Resolve relative to the project root
+        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        filepath = os.path.join(_project_root, "household_power_consumption.txt")
     df = pd.read_csv(filepath, sep=';', low_memory=False)
     
     df['datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M:%S')

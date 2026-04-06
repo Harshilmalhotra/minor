@@ -12,7 +12,15 @@ from src.models.tcn import TCNModel
 from src.models.cascade_lstm import CascadeLSTMModel
 from src.models.bilstm import BiLSTMModel
 from src.fl.client import TimeSeriesClient
+from src.fl.fed_client import FedClient
 from src.fl.layering import LayeredFedAvg
+from src.fl.strategies import (
+    FedNova, SCAFFOLD, FedOpt, FedAdam,
+    FedYogi, FedAdagrad, FedDyn, ClusteredFL
+)
+
+# Strategies that require the custom FedClient with modified local training
+_CUSTOM_CLIENT_STRATEGIES = {"scaffold", "feddyn", "fednova"}
 
 def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, selected_features=None, strategy_type="fedavg"):
     print(f"Starting FL Simulation for {model_type.upper()} ({distribution.upper()}) with {strategy_type.upper()}")
@@ -32,22 +40,34 @@ def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, se
     elif distribution == "algorithmic":
         client_data = create_algorithmic_splits(X_train, y_train, num_clients)
         
-    def client_fn(cid: str) -> fl.client.Client:
+    def _create_model():
         if model_type == "lstm":
-            model = LSTMModel(input_size=num_features)
+            return LSTMModel(input_size=num_features)
         elif model_type == "cascade":
-            model = CascadeLSTMModel(input_size=num_features)
+            return CascadeLSTMModel(input_size=num_features)
         elif model_type == "bilstm":
-            model = BiLSTMModel(input_size=num_features)
+            return BiLSTMModel(input_size=num_features)
         else:
-            model = TCNModel(input_size=num_features, num_channels=[128, 128, 128], kernel_size=3)
-            
-        tc = TimeSeriesClient(
-            model=model, 
-            train_data=client_data[int(cid)],
-            test_data=test_data,
-            scaler=scaler_y
-        )
+            return TCNModel(input_size=num_features, num_channels=[128, 128, 128], kernel_size=3)
+
+    def client_fn(cid: str) -> fl.client.Client:
+        model = _create_model()
+
+        if strategy_type in _CUSTOM_CLIENT_STRATEGIES:
+            tc = FedClient(
+                model=model,
+                train_data=client_data[int(cid)],
+                test_data=test_data,
+                scaler=scaler_y,
+                strategy_type=strategy_type
+            )
+        else:
+            tc = TimeSeriesClient(
+                model=model, 
+                train_data=client_data[int(cid)],
+                test_data=test_data,
+                scaler=scaler_y
+            )
         if hasattr(tc, 'to_client'):
             return tc.to_client()
         return tc
@@ -61,35 +81,41 @@ def main(model_type="lstm", distribution="iid", num_clients=5, num_rounds=20, se
             aggregated[key] = sum([num_examples * m[key] for num_examples, m in metrics]) / total_examples
         return aggregated
 
-    if strategy_type == "fedprox":
-        strategy = fl.server.strategy.FedProx(
-            proximal_mu=0.1,
-            fraction_fit=1.0,
-            fraction_evaluate=1.0,
-            min_fit_clients=num_clients,
-            min_evaluate_clients=num_clients,
-            min_available_clients=num_clients,
-            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
-        )
+    # ── Common strategy kwargs ──
+    _common = dict(
+        fraction_fit=1.0,
+        fraction_evaluate=1.0,
+        min_fit_clients=num_clients,
+        min_evaluate_clients=num_clients,
+        min_available_clients=num_clients,
+        evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn,
+    )
+
+    if strategy_type == "fedavg":
+        strategy = fl.server.strategy.FedAvg(**_common)
+    elif strategy_type == "fedprox":
+        strategy = fl.server.strategy.FedProx(proximal_mu=0.1, **_common)
     elif strategy_type == "layered":
-        strategy = LayeredFedAvg(
-            layer_bias={0: 1.0, 1: 0.95}, # Example bias for layering
-            fraction_fit=1.0,
-            fraction_evaluate=1.0,
-            min_fit_clients=num_clients,
-            min_evaluate_clients=num_clients,
-            min_available_clients=num_clients,
-            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
-        )
+        strategy = LayeredFedAvg(layer_bias={0: 1.0, 1: 0.95}, **_common)
+    elif strategy_type == "fednova":
+        strategy = FedNova(**_common)
+    elif strategy_type == "scaffold":
+        strategy = SCAFFOLD(**_common)
+    elif strategy_type == "fedopt":
+        strategy = FedOpt(server_lr=1.0, momentum=0.9, **_common)
+    elif strategy_type == "fedadam":
+        strategy = FedAdam(server_lr=0.01, **_common)
+    elif strategy_type == "fedyogi":
+        strategy = FedYogi(server_lr=0.01, **_common)
+    elif strategy_type == "fedadagrad":
+        strategy = FedAdagrad(server_lr=0.1, **_common)
+    elif strategy_type == "feddyn":
+        strategy = FedDyn(alpha=0.01, **_common)
+    elif strategy_type == "clustered":
+        strategy = ClusteredFL(n_clusters=2, **_common)
     else:
-        strategy = fl.server.strategy.FedAvg(
-            fraction_fit=1.0,
-            fraction_evaluate=1.0,
-            min_fit_clients=num_clients,
-            min_evaluate_clients=num_clients,
-            min_available_clients=num_clients,
-            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn
-        )
+        print(f"⚠️  Unknown strategy '{strategy_type}', falling back to FedAvg")
+        strategy = fl.server.strategy.FedAvg(**_common)
 
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
