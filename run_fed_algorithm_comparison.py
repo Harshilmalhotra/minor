@@ -45,6 +45,8 @@ NUM_ROUNDS = 5
 LOCAL_EPOCHS = 2
 BATCH_SIZE = 64
 LR = 0.001
+DATA_SAMPLES = 200000            # Added: Limit rows for speed (None for full dataset)
+MAX_WORKERS = 4                  # Added: Number of concurrent processes
 
 ALGORITHMS = [
     ("FedAvg",       "fedavg"),
@@ -312,7 +314,7 @@ def aggregate(strategy, client_results, server_state, round_idx):
 # ---------------------------------------------------------------
 #  Evaluate global model
 # ---------------------------------------------------------------
-def evaluate_global(model, X_test, y_test, scaler_y):
+def evaluate_global(model, X_test, y_test, scaler_y, alg_name=""):
     model.eval()
     X_t = torch.tensor(X_test, dtype=torch.float32)
     y_t = torch.tensor(y_test, dtype=torch.float32)
@@ -328,7 +330,7 @@ def evaluate_global(model, X_test, y_test, scaler_y):
 # ---------------------------------------------------------------
 #  Run one full FL experiment
 # ---------------------------------------------------------------
-def run_single_experiment(strategy_key, client_data, X_test, y_test,
+def run_single_experiment(strategy_key, alg_name, client_data, X_test, y_test,
                           scaler_y, num_features, num_rounds=NUM_ROUNDS):
     # Initialize global model
     global_model = CascadeLSTMModel(input_size=num_features)
@@ -364,7 +366,7 @@ def run_single_experiment(strategy_key, client_data, X_test, y_test,
 
         # Evaluate
         set_params(global_model, global_params)
-        loss, metrics = evaluate_global(global_model, X_test, y_test, scaler_y)
+        loss, metrics = evaluate_global(global_model, X_test, y_test, scaler_y, alg_name)
 
         round_metrics_list.append({
             "Round": rnd,
@@ -374,135 +376,156 @@ def run_single_experiment(strategy_key, client_data, X_test, y_test,
 
         acc_str = f"{metrics.get('Accuracy (%)', 0):.2f}%"
         mae_str = f"{metrics.get('MAE', 0):.4f}"
-        print(f"    Round {rnd}/{num_rounds} | Acc: {acc_str} | MAE: {mae_str} | Loss: {loss:.6f}")
+        print(f"    [{alg_name}] Round {rnd}/{num_rounds} | Acc: {acc_str} | MAE: {mae_str} | Loss: {loss:.6f}", flush=True)
 
-    return round_metrics_list
+    return alg_name, round_metrics_list
 
 
 # ---------------------------------------------------------------
 #  Main comparison
 # ---------------------------------------------------------------
 def run_comparison():
+    import concurrent.futures
     print("=" * 80)
     print("  FEDERATED ALGORITHM COMPARISON -- Cascade LSTM on Algorithmic Nodes")
     print("=" * 80)
     print(f"  Model: {MODEL_TYPE.upper()} | Distribution: {DISTRIBUTION}")
     print(f"  Clients: {NUM_CLIENTS} | Rounds: {NUM_ROUNDS} | Local Epochs: {LOCAL_EPOCHS}")
+    if DATA_SAMPLES:
+        print(f"  Dataset Limit: First {DATA_SAMPLES} rows")
     print("=" * 80)
 
     # Load and prepare data
-    print("\n  Loading dataset...")
-    df = load_data()
+    print("\n  Loading and preprocessing dataset...", flush=True)
+    df = load_data(nrows=DATA_SAMPLES)
+    print(f"    Preprocessing data splits (train/test)...", flush=True)
     X_train, y_train, X_test, y_test, scaler_X, scaler_y = prepare_data(df)
     num_features = X_train.shape[2]
-    print(f"  Data loaded: {X_train.shape[0]} train / {X_test.shape[0]} test samples, {num_features} features")
+    print(f"  [OK] Data loaded: {X_train.shape[0]} train / {X_test.shape[0]} test samples, {num_features} features")
 
     # Create algorithmic client splits
     client_data = create_algorithmic_splits(X_train, y_train, NUM_CLIENTS)
     print(f"  Created {NUM_CLIENTS} algorithmic client splits\n")
 
+    # Check for existing results to avoid re-running FedAvg and FedProx
+    skip_algs = ["FedAvg", "FedProx"]
+    print(f"  [INFO] Skipping algorithms already completed: {', '.join(skip_algs)}")
+    
     all_final_results = []
     all_per_round = []
-
-    for alg_name, strategy_key in ALGORITHMS:
-        print(f"\n{'-' * 60}")
-        print(f"  >> Running: {alg_name} (strategy={strategy_key})")
-        print(f"{'-' * 60}")
-
-        t_start = time.time()
-
+    
+    # Reload existing results if possible to avoid losing them
+    res_path = "results/fed_algorithm_comparison.csv"
+    round_path = "results/fed_algorithm_per_round.csv"
+    if os.path.exists(res_path):
         try:
-            round_metrics = run_single_experiment(
-                strategy_key, client_data, X_test, y_test, scaler_y, num_features
-            )
-        except Exception as e:
-            print(f"  [FAIL] {alg_name} failed: {e}")
-            traceback.print_exc()
-            round_metrics = []
+            df_existing = pd.read_csv(res_path)
+            all_final_results = df_existing.to_dict('records')
+            if os.path.exists(round_path):
+                df_rounds_existing = pd.read_csv(round_path)
+                all_per_round = df_rounds_existing.to_dict('records')
+        except Exception:
+            pass
 
-        elapsed = time.time() - t_start
+    # Algorithms to run (excluding skipped ones)
+    to_run = [(name, strategy) for name, strategy in ALGORITHMS if name not in skip_algs]
+    
+    print(f"\n  Starting parallel execution with {MAX_WORKERS} workers...\n")
+    
+    t_total_start = time.time()
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all jobs
+        futures = {
+            executor.submit(run_single_experiment, strategy, name, client_data, X_test, y_test, scaler_y, num_features): name
+            for name, strategy in to_run
+        }
+        
+        for future in concurrent.futures.as_completed(futures):
+            alg_name = futures[future]
+            t_start = time.time() # This is a placeholder for time, real elapsed is handled differently if needed
+            
+            try:
+                name, round_metrics = future.result()
+                elapsed = time.time() - t_total_start # Overall elapsed since start of parallel
+                
+                # Final metrics = last round
+                if round_metrics:
+                    final = round_metrics[-1].copy()
+                    del final["Round"]
+                    del final["Loss"]
 
-        # Final metrics = last round
-        if round_metrics:
-            final = round_metrics[-1].copy()
-            del final["Round"]
-            del final["Loss"]
+                    # Best metrics across rounds
+                    best_acc = max(r["Accuracy (%)"] for r in round_metrics)
+                    best_mae = min(r["MAE"] for r in round_metrics)
+                    best_rmse = min(r["RMSE"] for r in round_metrics)
 
-            # Best metrics across rounds
-            best_acc = max(r["Accuracy (%)"] for r in round_metrics)
-            best_mae = min(r["MAE"] for r in round_metrics)
-            best_rmse = min(r["RMSE"] for r in round_metrics)
+                    # Convergence round (first time Accuracy > 90%)
+                    conv_round = None
+                    for r in round_metrics:
+                        if r["Accuracy (%)"] >= 90.0:
+                            conv_round = r["Round"]
+                            break
 
-            # Convergence round (first time Accuracy > 90%)
-            conv_round = None
-            for r in round_metrics:
-                if r["Accuracy (%)"] >= 90.0:
-                    conv_round = r["Round"]
-                    break
+                    final_result = {
+                        "Algorithm": name,
+                        **final,
+                        "Final Loss": round_metrics[-1]["Loss"],
+                        "Best Accuracy (%)": best_acc,
+                        "Best MAE": best_mae,
+                        "Best RMSE": best_rmse,
+                        "Convergence Round (>90%)": conv_round if conv_round else "N/A",
+                        "Rounds Completed": len(round_metrics),
+                        "Training Time (s)": "Parallel", # Individual time is harder to track perfectly here
+                    }
+                    
+                    all_final_results.append(final_result)
+                    for r in round_metrics:
+                        all_per_round.append({"Algorithm": name, **r})
+                    
+                    print(f"  [OK] {name} completed.")
+                    
+                    # Incremental Save
+                    os.makedirs("results", exist_ok=True)
+                    pd.DataFrame(all_final_results).to_csv(res_path, index=False)
+                    pd.DataFrame(all_per_round).to_csv(round_path, index=False)
+                    print(f"  [SAVE] Progress updated in {res_path}")
 
-            final_result = {
-                "Algorithm": alg_name,
-                **final,
-                "Final Loss": round_metrics[-1]["Loss"],
-                "Best Accuracy (%)": best_acc,
-                "Best MAE": best_mae,
-                "Best RMSE": best_rmse,
-                "Convergence Round (>90%)": conv_round if conv_round else "N/A",
-                "Rounds Completed": len(round_metrics),
-                "Training Time (s)": round(elapsed, 2),
-            }
-        else:
-            final_result = {
-                "Algorithm": alg_name,
-                "Accuracy (%)": np.nan, "MAE": np.nan, "RMSE": np.nan,
-                "MAPE": np.nan, "sMAPE": np.nan,
-                "Final Loss": np.nan,
-                "Best Accuracy (%)": np.nan, "Best MAE": np.nan, "Best RMSE": np.nan,
-                "Convergence Round (>90%)": "N/A",
-                "Rounds Completed": 0,
-                "Training Time (s)": round(elapsed, 2),
-            }
+            except Exception as e:
+                print(f"  [FAIL] {alg_name} failed: {e}")
+                traceback.print_exc()
 
-        all_final_results.append(final_result)
-
-        # Collect per-round data
-        for r in round_metrics:
-            all_per_round.append({"Algorithm": alg_name, **r})
-
-        acc = final_result.get("Accuracy (%)", np.nan)
-        mae = final_result.get("MAE", np.nan)
-        print(f"  [OK] {alg_name}: Accuracy={acc:.2f}%, MAE={mae:.4f}, Time={elapsed:.1f}s")
-
-    # ------ Save results ------
-    os.makedirs("results", exist_ok=True)
-
+    # ------ Final Summary ------
     df_final = pd.DataFrame(all_final_results)
-    cols_order = [
-        "Algorithm", "Accuracy (%)", "MAE", "RMSE", "MAPE", "sMAPE",
-        "Final Loss", "Best Accuracy (%)", "Best MAE", "Best RMSE",
-        "Convergence Round (>90%)", "Rounds Completed", "Training Time (s)"
-    ]
-    cols_order = [c for c in cols_order if c in df_final.columns]
-    df_final = df_final[cols_order]
-    df_final.to_csv("results/fed_algorithm_comparison.csv", index=False)
-
-    if all_per_round:
-        df_rounds = pd.DataFrame(all_per_round)
-        df_rounds.to_csv("results/fed_algorithm_per_round.csv", index=False)
+    if not df_final.empty:
+        # Re-sort to maintain ALGORITHMS order if possible
+        order_map = {name: i for i, (name, _) in enumerate(ALGORITHMS)}
+        df_final['sort_idx'] = df_final['Algorithm'].map(order_map)
+        df_final = df_final.sort_values('sort_idx').drop(columns=['sort_idx'])
+        
+        cols_order = [
+            "Algorithm", "Accuracy (%)", "MAE", "RMSE", "MAPE", "sMAPE",
+            "Final Loss", "Best Accuracy (%)", "Best MAE", "Best RMSE",
+            "Convergence Round (>90%)", "Rounds Completed", "Training Time (s)"
+        ]
+        cols_order = [c for c in cols_order if c in df_final.columns]
+        df_final = df_final[cols_order]
 
     # Print table
     print("\n")
     print("=" * 100)
-    print("  FINAL COMPARISON RESULTS")
+    print("  FINAL COMPARISON RESULTS (INCREMENTAL)")
     print("=" * 100)
-    try:
-        print(df_final.to_markdown(index=False, floatfmt=".4f"))
-    except Exception:
-        print(df_final.to_string(index=False))
+    if not df_final.empty:
+        try:
+            print(df_final.to_markdown(index=False, floatfmt=".4f"))
+        except Exception:
+            print(df_final.to_string(index=False))
+    else:
+        print("  No results completed.")
 
-    print(f"\n[DONE] Results saved to results/fed_algorithm_comparison.csv")
-    if all_per_round:
-        print(f"[DONE] Per-round data saved to results/fed_algorithm_per_round.csv")
+    print(f"\n[DONE] Final results available in {res_path}")
+    return df_final
 
     return df_final
 

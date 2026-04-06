@@ -3,24 +3,34 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-def load_data(filepath=None, selected_features=None):
+def load_data(filepath=None, selected_features=None, nrows=None):
     if filepath is None:
         # Resolve relative to the project root
         _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         filepath = os.path.join(_project_root, "household_power_consumption.txt")
-    df = pd.read_csv(filepath, sep=';', low_memory=False)
     
-    df['datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M:%S')
+    print(f"    [1/5] Reading CSV from {os.path.basename(filepath)}...", flush=True)
+    # Read CSV. Using na_values to handle '?' directly during read
+    df = pd.read_csv(filepath, sep=';', low_memory=False, na_values=['?'], nrows=nrows)
+    
+    print(f"    [2/5] Converting to datetime (this may take a moment)...", flush=True)
+    # Optimization: combine Date and Time and use cache=True
+    df['datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M:%S', cache=True)
     df.set_index('datetime', inplace=True)
     df.drop(columns=['Date', 'Time'], inplace=True)
-    df.replace('?', np.nan, inplace=True)
-    df = df.apply(pd.to_numeric)
+    
+    print(f"    [3/5] Cleaning and converting to numeric...", flush=True)
+    # Optimization: pd.to_numeric is faster when applied per-column or on the whole DF if we know it's mostly numeric
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     
     # Handle missing values
+    print(f"    [4/5] Handling missing values (interpolation)...", flush=True)
     df = df.interpolate(method='time')
     df = df.bfill()
     
     # Resample to hourly data
+    print(f"    [5/5] Resampling to hourly data...", flush=True)
     df_hourly = df.resample('1h').mean()
     
     # Add cyclical time features
